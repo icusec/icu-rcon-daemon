@@ -1,0 +1,29 @@
+# Binaries
+ICURconDaemon
+ICURconDaemon.exe
+ICURconDaemon-linux-amd64
+ICURconDaemon-windows-amd64.exe
+*.exe
+
+# Config
+config.ini
+
+# Go
+*.o
+*.a
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+/dist/
+/bin/
