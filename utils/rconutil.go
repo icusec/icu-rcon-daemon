@@ -11,6 +11,7 @@ import (
 	"time"
 )
 
+// RCON packet types (Source RCON protocol).
 const (
 	cmdAuth        = 3
 	cmdExecCommand = 2
@@ -19,16 +20,29 @@ const (
 	respAuthResponse = 2
 )
 
-// 12 byte header, up to 4096 bytes of data, 2 bytes for null terminators.
-// this should be the absolute max size of a single response.
+// readBufferSize is the maximum size of a single RCON packet payload plus its
+// 4-byte length header. Vanilla Minecraft caps responses at 4096 bytes; the
+// generous headroom keeps unusual servers working while still bounding reads.
 const readBufferSize = 99999
 
+// maxCommandLength limits the command body. Some servers drop or corrupt
+// longer commands, so the historic 1024-10 limit is preserved.
+const maxCommandLength = 1024 - 10
+
+// Network budgets. The command read timeout is intentionally generous: long
+// running commands (backups, world saves) can legitimately take minutes.
+const (
+	dialTimeout  = 10 * time.Second
+	writeTimeout = 10 * time.Second
+	authTimeout  = 10 * time.Second
+	readTimeout  = 2 * time.Minute
+)
+
 type RemoteConsole struct {
-	conn      net.Conn
-	readbuf   []byte
-	readmu    sync.Mutex
-	reqid     int32
-	queuedbuf []byte
+	conn    net.Conn
+	readbuf []byte
+	readmu  sync.Mutex
+	reqid   int32
 }
 
 var (
@@ -39,33 +53,34 @@ var (
 	ErrResponseTooLong     = errors.New("返回信息太长")
 )
 
+// Dial connects to the RCON server at host ("host:port") and authenticates
+// with password. On any handshake failure the underlying socket is closed, so
+// a failed authentication never leaks a connection.
 func Dial(host, password string) (*RemoteConsole, error) {
-	const timeout = 10 * time.Second
-	conn, err := net.DialTimeout("tcp", host, timeout)
+	conn, err := net.DialTimeout("tcp", host, dialTimeout)
 	if err != nil {
 		return nil, err
 	}
 
-	var reqid int
-	r := &RemoteConsole{conn: conn, reqid: 0x7fffffff}
-	reqid, err = r.writeCmd(cmdAuth, password)
+	ok := false
+	defer func() {
+		if !ok {
+			conn.Close()
+		}
+	}()
+
+	r := &RemoteConsole{conn: conn, reqid: 0x7fffffff, readbuf: make([]byte, readBufferSize)}
+
+	reqid, err := r.writeCmd(cmdAuth, password)
 	if err != nil {
 		return nil, err
 	}
 
-	r.readbuf = make([]byte, readBufferSize)
-
-	var respType, requestId int
-	respType, requestId, _, err = r.readResponse(timeout)
-	if err != nil {
-		return nil, err
-	}
-
-	// if we didn't get an auth response back, try again. it is often a bug
-	// with RCON servers that you get an empty response before receiving the
-	// auth response.
-	if respType != respAuthResponse {
-		respType, requestId, _, err = r.readResponse(timeout)
+	respType, requestId, _, err := r.readResponse(authTimeout)
+	// Some RCON implementations emit a stray packet before the auth response;
+	// read once more when the first packet is not the auth reply.
+	if err == nil && respType != respAuthResponse {
+		respType, requestId, _, err = r.readResponse(authTimeout)
 	}
 	if err != nil {
 		return nil, err
@@ -77,6 +92,7 @@ func Dial(host, password string) (*RemoteConsole, error) {
 		return nil, ErrAuthFailed
 	}
 
+	ok = true
 	return r, nil
 }
 
@@ -88,21 +104,20 @@ func (r *RemoteConsole) RemoteAddr() net.Addr {
 	return r.conn.RemoteAddr()
 }
 
+// Write sends an exec command and returns its request id.
 func (r *RemoteConsole) Write(cmd string) (requestId int, err error) {
 	return r.writeCmd(cmdExecCommand, cmd)
 }
 
+// Read waits for the response of the previously sent command. The response is
+// always a freshly allocated string, safe to retain after further reads.
 func (r *RemoteConsole) Read() (response string, requestId int, err error) {
 	var respType int
-	var respBytes []byte
-	respType, requestId, respBytes, err = r.readResponse(2 * time.Minute)
+	respType, requestId, respBytes, err := r.readResponse(readTimeout)
 	if err != nil || respType != respResponse {
-		response = ""
-		requestId = 0
-	} else {
-		response = string(respBytes)
+		return "", 0, err
 	}
-	return
+	return string(respBytes), requestId, nil
 }
 
 func (r *RemoteConsole) Close() error {
@@ -116,108 +131,72 @@ func newRequestId(id int32) int32 {
 	return id + 1
 }
 
+// writeCmd assembles and sends one RCON packet. The 14-byte header and body
+// are written into a single pre-sized buffer: no intermediate bytes.Buffer,
+// no binary.Write reflection, one allocation, one socket write.
 func (r *RemoteConsole) writeCmd(cmdType int32, str string) (int, error) {
-	if len(str) > 1024-10 {
+	if len(str) > maxCommandLength {
 		return -1, ErrCommandTooLong
 	}
 
-	buffer := bytes.NewBuffer(make([]byte, 0, 14+len(str)))
-	reqid := atomic.LoadInt32(&r.reqid)
-	reqid = newRequestId(reqid)
+	reqid := newRequestId(atomic.LoadInt32(&r.reqid))
 	atomic.StoreInt32(&r.reqid, reqid)
 
-	// packet size
-	binary.Write(buffer, binary.LittleEndian, int32(10+len(str)))
+	packet := make([]byte, 14+len(str))
+	binary.LittleEndian.PutUint32(packet[0:], uint32(10+len(str)))
+	binary.LittleEndian.PutUint32(packet[4:], uint32(reqid))
+	binary.LittleEndian.PutUint32(packet[8:], uint32(cmdType))
+	copy(packet[12:], str)
+	// The two trailing NUL terminators are already zero-valued.
 
-	// request id
-	binary.Write(buffer, binary.LittleEndian, int32(reqid))
-
-	// auth cmd
-	binary.Write(buffer, binary.LittleEndian, int32(cmdType))
-
-	// string (null terminated)
-	buffer.WriteString(str)
-	binary.Write(buffer, binary.LittleEndian, byte(0))
-
-	// string 2 (null terminated)
-	// we don't have a use for string 2
-	binary.Write(buffer, binary.LittleEndian, byte(0))
-
-	r.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	_, err := r.conn.Write(buffer.Bytes())
-	return int(reqid), err
+	r.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if _, err := r.conn.Write(packet); err != nil {
+		return -1, err
+	}
+	return int(reqid), nil
 }
 
+// readResponse reads exactly one packet: 4-byte little-endian size, then the
+// payload. Exact io.ReadFull reads mean two packets sent back-to-back are
+// never coalesced incorrectly and no leftover bytes need buffering.
 func (r *RemoteConsole) readResponse(timeout time.Duration) (int, int, []byte, error) {
 	r.readmu.Lock()
 	defer r.readmu.Unlock()
 
 	r.conn.SetReadDeadline(time.Now().Add(timeout))
-	var size int
-	var err error
-	if r.queuedbuf != nil {
-		copy(r.readbuf, r.queuedbuf)
-		size = len(r.queuedbuf)
-		r.queuedbuf = nil
-	} else {
-		size, err = r.conn.Read(r.readbuf)
-		if err != nil {
-			return 0, 0, nil, err
-		}
-	}
-	if size < 4 {
-		// need the 4 byte packet size...
-		s, err := r.conn.Read(r.readbuf[size:])
-		if err != nil {
-			return 0, 0, nil, err
-		}
-		size += s
-	}
 
-	var dataSize32 int32
-	b := bytes.NewBuffer(r.readbuf[:size])
-	binary.Read(b, binary.LittleEndian, &dataSize32)
-	if dataSize32 < 10 {
+	var sizeBuf [4]byte
+	if _, err := io.ReadFull(r.conn, sizeBuf[:]); err != nil {
+		return 0, 0, nil, err
+	}
+	dataSize := int(int32(binary.LittleEndian.Uint32(sizeBuf[:])))
+	if dataSize < 10 {
 		return 0, 0, nil, ErrUnexpectedFormat
 	}
-
-	totalSize := size
-	dataSize := int(dataSize32)
-	if dataSize > readBufferSize {
+	if dataSize > readBufferSize-4 {
 		return 0, 0, nil, ErrResponseTooLong
 	}
 
-	for dataSize+4 > totalSize {
-		size, err := r.conn.Read(r.readbuf[totalSize:])
-		if err != nil {
-			return 0, 0, nil, err
-		}
-		totalSize += size
-	}
-
-	data := r.readbuf[4 : 4+dataSize]
-	if totalSize > dataSize+4 {
-		// start of the next buffer was at the end of this packet.
-		// save it for the next read.
-		r.queuedbuf = r.readbuf[4+dataSize : totalSize]
-	}
-
-	return r.readResponseData(data)
-}
-
-func (r *RemoteConsole) readResponseData(data []byte) (int, int, []byte, error) {
-	var requestId, responseType int32
-	var response []byte
-	b := bytes.NewBuffer(data)
-	binary.Read(b, binary.LittleEndian, &requestId)
-	binary.Read(b, binary.LittleEndian, &responseType)
-	response, err := b.ReadBytes(0x00)
-	if err != nil && err != io.EOF {
+	body := r.readbuf[:dataSize]
+	if _, err := io.ReadFull(r.conn, body); err != nil {
 		return 0, 0, nil, err
 	}
-	if err == nil {
-		// if we didn't hit EOF, we have a null byte to remove
-		response = response[:len(response)-1]
+	return readResponseData(body)
+}
+
+// readResponseData parses id/type/body out of a packet payload. The returned
+// body aliases data (and therefore the internal read buffer); callers must
+// copy before the next read. RemoteConsole.Read does this by returning a
+// string immediately.
+func readResponseData(data []byte) (int, int, []byte, error) {
+	if len(data) < 8 {
+		return 0, 0, nil, ErrUnexpectedFormat
 	}
-	return int(responseType), int(requestId), response, nil
+	requestId := int(int32(binary.LittleEndian.Uint32(data[0:4])))
+	respType := int(int32(binary.LittleEndian.Uint32(data[4:8])))
+	payload := data[8:]
+	if i := bytes.IndexByte(payload, 0); i >= 0 {
+		payload = payload[:i]
+	}
+	return respType, requestId, payload, nil
 }

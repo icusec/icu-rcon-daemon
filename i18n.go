@@ -20,29 +20,35 @@ func initLang() {
 
 func detectLang() lang {
 	for _, env := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
-		val := os.Getenv(env)
-		if strings.Contains(strings.ToLower(val), "zh") {
+		if strings.Contains(strings.ToLower(os.Getenv(env)), "zh") {
 			return langZH
 		}
+	}
+	if sl := systemLang(); sl != "" {
+		return sl
 	}
 	return langEN
 }
 
 type messages struct {
-	FirstRunTitle          string
-	FirstRunHint           string
-	PortPrompt             string
-	AuthKeyPrompt          string
-	ConfigSaved            string
-	YourAuthKey            string
-	KeepAuthKeySafe        string
-	FailedSaveConfig       string
-	Starting               string
-	InvalidAuthKey         string
-	FailedConnectRCON      string
-	FailedExecRCON         string
-	FailedReadRCON         string
-	RCONIDMismatch         string
+	FirstRunTitle     string
+	FirstRunHint      string
+	PortPrompt        string
+	AuthKeyPrompt     string
+	ConfigSaved       string
+	YourAuthKey       string
+	KeepAuthKeySafe   string
+	FailedSaveConfig  string
+	Starting          string
+	InvalidAuthKey    string
+	FailedConnectRCON string
+	FailedExecRCON    string
+	FailedReadRCON    string
+	RCONIDMismatch    string
+	MethodNotAllowed  string
+	ListenFailed      string
+	ShuttingDown      string
+	InvalidPortInput  string
 }
 
 var msgMap = map[lang]messages{
@@ -61,6 +67,10 @@ var msgMap = map[lang]messages{
 		FailedExecRCON:    "执行RCON命令失败: %v",
 		FailedReadRCON:    "读取RCON消息失败: %v",
 		RCONIDMismatch:    "RCON响应ID不匹配",
+		MethodNotAllowed:  "仅支持 POST 请求",
+		ListenFailed:      "服务启动失败: %v",
+		ShuttingDown:      "正在退出，等待连接收尾…",
+		InvalidPortInput:  "无效的端口号，请输入 1-65535 之间的数字。",
 	},
 	langEN: {
 		FirstRunTitle:     "=== ICURconDaemon First Run Configuration ===",
@@ -77,6 +87,10 @@ var msgMap = map[lang]messages{
 		FailedExecRCON:    "Failed to execute RCON command: %v",
 		FailedReadRCON:    "Failed to read RCON message: %v",
 		RCONIDMismatch:    "RCON ID mismatch",
+		MethodNotAllowed:  "Only POST is supported",
+		ListenFailed:      "Failed to start server: %v",
+		ShuttingDown:      "Shutting down, draining connections…",
+		InvalidPortInput:  "Invalid port, please enter a number between 1 and 65535.",
 	},
 }
 

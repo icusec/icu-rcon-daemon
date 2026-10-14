@@ -3,7 +3,13 @@ ICURconDaemon
 ICURconDaemon.exe
 ICURconDaemon-linux-amd64
 ICURconDaemon-windows-amd64.exe
+ICURconClient*
 *.exe
+
+# User data written by the client next to its executable
+client/servers.json
+servers.json
+*.tmp
 
 # Config
 config.ini
@@ -12,6 +18,10 @@ config.ini
 *.o
 *.a
 *.so
+*.log
+
+# Note: build/icon.ico and rsrc_windows_amd64.syso are intentionally tracked
+# so plain `go build` produces binaries with the embedded icon.
 
 # IDE
 .idea/
@@ -23,6 +33,7 @@ config.ini
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Build
 /dist/

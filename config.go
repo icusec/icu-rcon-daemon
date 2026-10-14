@@ -2,12 +2,13 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
-
-	"github.com/google/uuid"
+	"time"
 )
 
 type Config struct {
@@ -16,6 +17,12 @@ type Config struct {
 }
 
 const configFile = "config.ini"
+
+// validPort reports whether s is a usable TCP port.
+func validPort(s string) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 1 && n <= 65535
+}
 
 func loadConfig() *Config {
 	data, err := os.ReadFile(configFile)
@@ -41,12 +48,17 @@ func loadConfig() *Config {
 			cfg.AuthKey = value
 		}
 	}
+	// A config missing a usable port or auth key is treated as not configured
+	// (an empty auth key would otherwise accept every request).
+	if !validPort(cfg.Port) || cfg.AuthKey == "" {
+		return nil
+	}
 	return cfg
 }
 
 func saveConfig(cfg *Config) error {
 	content := fmt.Sprintf("# ICURconDaemon Config\nport=%s\nauthkey=%s\n", cfg.Port, cfg.AuthKey)
-	return os.WriteFile(configFile, []byte(content), 0644)
+	return os.WriteFile(configFile, []byte(content), 0o600)
 }
 
 func promptConfig() *Config {
@@ -56,18 +68,26 @@ func promptConfig() *Config {
 	fmt.Println(m.FirstRunTitle)
 	fmt.Println(m.FirstRunHint)
 
-	fmt.Print(m.PortPrompt)
-	portInput, _ := reader.ReadString('\n')
-	portInput = strings.TrimSpace(portInput)
-	port := "8080"
-	if portInput != "" {
-		port = portInput
+	var port string
+	for {
+		fmt.Print(m.PortPrompt)
+		portInput, _ := reader.ReadString('\n')
+		portInput = strings.TrimSpace(portInput)
+		if portInput == "" {
+			port = "8080"
+			break
+		}
+		if validPort(portInput) {
+			port = portInput
+			break
+		}
+		fmt.Println(m.InvalidPortInput)
 	}
 
 	fmt.Print(m.AuthKeyPrompt)
 	authInput, _ := reader.ReadString('\n')
 	authInput = strings.TrimSpace(authInput)
-	authKey := uuid.New().String()
+	authKey := newUUID()
 	if authInput != "" {
 		authKey = authInput
 	}
@@ -80,4 +100,20 @@ func promptConfig() *Config {
 	fmt.Printf(m.YourAuthKey+"\n", authKey)
 	fmt.Println(m.KeepAuthKeySafe)
 	return cfg
+}
+
+// newUUID returns a random RFC 4122 version 4 UUID without external deps.
+func newUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Practically unreachable; keep running even if the system RNG fails.
+		now := time.Now().UnixNano()
+		for i := range b {
+			b[i] = byte(now >> (uint(i%8) * 8))
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
