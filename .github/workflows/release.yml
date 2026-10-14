@@ -36,7 +36,7 @@ jobs:
       - name: Build client (Linux, Ubuntu 20.04 base for low glibc requirement)
         run: |
           docker run --rm -v "$PWD:/src" -w /src/client ubuntu:20.04 bash -e -c \
-            "sed -i 's|archive.ubuntu.com|old-releases.ubuntu.com|g; s|security.ubuntu.com|old-releases.ubuntu.com|g' /etc/apt/sources.list && \
+            "sed -i 's|old-releases.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list && \
              apt-get update -qq && \
              apt-get install -y -qq --no-install-recommends wget ca-certificates libgl1-mesa-dev xorg-dev > /dev/null && \
              wget -qO /tmp/go.tgz https://go.dev/dl/go1.24.0.linux-amd64.tar.gz && \
