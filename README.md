@@ -142,7 +142,7 @@ A **native Go GUI client** built with [Gio UI](https://gioui.org) — no Electro
 - **Light / dark theme**: follows the system color mode automatically, with a manual toggle in the footer (choice is remembered)
 - **Error handling**: connection failures, auth failures, timeouts, invalid ports and corrupted JSON all surface as clear UI messages; a corrupted `servers.json` is backed up and recreated
 - **Bilingual UI**: follows system language, one-click toggle
-- **Cross-platform**: Windows & Linux binaries ship with releases (the Linux build targets glibc ≥ 2.31); macOS builds natively on the target OS
+- **Cross-platform**: Windows & Linux binaries ship with releases (the Linux build targets glibc ≥ 2.35); macOS builds natively on the target OS
 
 ### Install & Launch
 
@@ -151,7 +151,7 @@ Download from [Releases](../../releases):
 | File | Platform |
 |---|---|
 | `ICURconClient-windows-amd64.exe` | Windows 10/11 x64 (built with `-H=windowsgui`, no console window) |
-| `ICURconClient-linux-amd64` | Linux x64 (glibc ≥ 2.31: Ubuntu 20.04+, Debian 11+; desktop GL environment required) |
+| `ICURconClient-linux-amd64` | Linux x64 (glibc ≥ 2.35: Ubuntu 22.04+, Debian 12+; desktop GL environment required) |
 | macOS | Build locally on the target OS (Gio's GL backend needs CGO) — see [Development](#development) |
 
 No installation required. On first launch a `servers.json` is created next to the executable.

@@ -76,7 +76,7 @@ if ($Client) {
     # Windows client builds with CGO disabled (pure Go + bundled font).
     Build-Client "windows" ".exe" @("-H=windowsgui")
     # Linux/macOS clients need CGO (Gio's GL backend). CI builds the Linux
-    # client inside an ubuntu:20.04 container (glibc >= 2.31). Locally:
+    # client on ubuntu-22.04 (glibc >= 2.35). Locally:
     #   linux:   CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -X main.clientVersion=$Version" -o ICURconClient .
     #   macos:   same command (requires Xcode Command Line Tools)
     Write-Host "Linux/macOS client must be built on the target OS (Gio GL backend needs CGO)." -ForegroundColor Yellow

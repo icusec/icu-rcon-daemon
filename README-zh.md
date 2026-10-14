@@ -155,7 +155,7 @@ go build -trimpath -ldflags "-s -w -X main.Version=v1.1.0" -o ICURconDaemon .
 - **明暗主题**：自动跟随系统深浅色模式，也可点击左下角按钮手动切换（选择会保存）
 - **错误处理**：连接失败、认证失败、超时、非法端口、JSON 损坏等情况均有明确的界面提示，`servers.json` 损坏时自动备份并重建
 - **中英双语**：跟随系统语言，可一键切换
-- **跨平台**：Windows / Linux 提供 Release 版（Linux 构建基于 Ubuntu 20.04，要求 glibc ≥ 2.31）；macOS 在目标系统上构建后可用
+- **跨平台**：Windows / Linux 提供 Release 版（Linux 构建基于 Ubuntu 22.04，要求 glibc ≥ 2.35）；macOS 在目标系统上构建后可用
 
 ### 安装与启动
 
@@ -164,7 +164,7 @@ go build -trimpath -ldflags "-s -w -X main.Version=v1.1.0" -o ICURconDaemon .
 | 文件 | 平台 |
 |---|---|
 | `ICURconClient-windows-amd64.exe` | Windows 10/11 x64 |
-| `ICURconClient-linux-amd64` | Linux x64（glibc ≥ 2.31：Ubuntu 20.04+ / Debian 11+，需桌面图形环境） |
+| `ICURconClient-linux-amd64` | Linux x64（glibc ≥ 2.35：Ubuntu 22.04+ / Debian 12+，需桌面图形环境） |
 | macOS | 请在目标系统上自行构建（Gio 的 GL 后端需要 CGO），见[开发与测试](#开发与测试) |
 
 Windows 版使用 `-H=windowsgui` 构建，启动后**不弹出黑色控制台窗口**。
