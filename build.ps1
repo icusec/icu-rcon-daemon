@@ -51,6 +51,8 @@ function Build-Daemon([string]$os, [string]$ext) {
     Write-Host "== daemon $os-amd64" -ForegroundColor Cyan
     if ($os -eq "windows") { Ensure-Syso $root "ICU RCON Daemon" "ICU RCON Daemon" "ICURconDaemon-windows-amd64.exe" }
     $out = Join-Path $root "ICURconDaemon-$os-amd64$ext"
+    # CGO_ENABLED=0 keeps the daemon fully static on Linux (no glibc dependency).
+    $env:CGO_ENABLED = "0"
     go -C $root build -trimpath -ldflags "-s -w -X main.Version=$Version" -o $out .
     if ($LASTEXITCODE -ne 0) { throw "daemon build failed" }
     Write-Host "   -> $out"
