@@ -77,7 +77,7 @@ if ($Client) {
     Build-Client "windows" ".exe" @("-H=windowsgui")
     # Linux/macOS clients need CGO (Gio's GL backend). CI builds the Linux
     # client on ubuntu-22.04 (glibc >= 2.35). Locally:
-    #   linux:   CGO_ENABLED=1 go build -trimpath -ldflags "-s -w -X main.clientVersion=$Version" -o ICURconClient .
+    #   linux:   CGO_ENABLED=1 go build -tags novulkan -trimpath -ldflags "-s -w -X main.clientVersion=$Version" -o ICURconClient .
     #   macos:   same command (requires Xcode Command Line Tools)
     Write-Host "Linux/macOS client must be built on the target OS (Gio GL backend needs CGO)." -ForegroundColor Yellow
     if ($Linux) {
