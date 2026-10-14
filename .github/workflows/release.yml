@@ -38,10 +38,10 @@ jobs:
           docker run --rm -v "$PWD:/src" -w /src/client ubuntu:20.04 bash -e -c \
             "sed -i 's|old-releases.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list && \
              apt-get update -qq && \
-             apt-get install -y -qq --no-install-recommends wget ca-certificates libgl1-mesa-dev xorg-dev > /dev/null && \
+             apt-get install -y -qq --no-install-recommends gcc pkg-config wget ca-certificates libgl1-mesa-dev xorg-dev > /dev/null && \
              wget -qO /tmp/go.tgz https://go.dev/dl/go1.24.0.linux-amd64.tar.gz && \
              tar -C /usr/local -xzf /tmp/go.tgz && \
-             /usr/local/go/bin/go build -trimpath -ldflags '-s -w -X main.clientVersion=${{ github.event.inputs.version || 'dev' }}' -o ../ICURconClient-linux-amd64 ."
+             CGO_ENABLED=1 /usr/local/go/bin/go build -trimpath -ldflags '-s -w -X main.clientVersion=${{ github.event.inputs.version || 'dev' }}' -o ../ICURconClient-linux-amd64 ."
 
       - name: Build client (Windows)
         working-directory: client
