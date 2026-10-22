@@ -1,5 +1,7 @@
 # ICURconDaemon
 
+[English](README.md) | **中文**
+
 一套轻量的 **Minecraft / 源RCON 服务器管理工具**，由两部分组成：
 
 | 组件 | 说明 |

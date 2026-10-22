@@ -1,5 +1,7 @@
 # ICURconDaemon
 
+**English** | [中文](README-zh.md)
+
 A lightweight **Minecraft / Source RCON server toolkit** with two components:
 
 | Component | Description |
@@ -9,7 +11,7 @@ A lightweight **Minecraft / Source RCON server toolkit** with two components:
 
 Both are **single-file Go binaries** with no runtime dependencies.
 
-> 📖 **New here? Read the [illustrated tutorial](docs/使用教程.md) (Chinese)** — what this project protects you from, deploying the daemon, claiming a server in the ICU server navigator, and connecting with the desktop client.
+> 📖 **New here? Read the [illustrated tutorial](docs/tutorial-en.md)** — what this project protects you from, deploying the daemon on Windows/Linux, verifying the forwarding path, and managing servers with the desktop client.
 
 ---
 
@@ -17,7 +19,7 @@ Both are **single-file Go binaries** with no runtime dependencies.
 
 - [ICURconDaemon (daemon)](#icurcondaemon-daemon)
 - [ICU RCON Client (desktop client)](#icu-rcon-client-desktop-client)
-- [Illustrated tutorial](docs/使用教程.md) (Chinese)
+- [Illustrated tutorial](docs/tutorial-en.md)
 - [v1.1.0 Improvements](#v110-improvements)
 - [Development](#development)
 - [License](#license)
@@ -157,6 +159,8 @@ Download from [Releases](../../releases):
 No installation required. On first launch a `servers.json` is created next to the executable.
 
 ### Usage Tutorial
+
+See the [illustrated tutorial](docs/tutorial-en.md) for screenshots, daemon deployment and the full walkthrough. The short version:
 
 1. **Add a server** — click **＋ Add Server**:
    - Name: anything you like
