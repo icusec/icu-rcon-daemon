@@ -41,10 +41,15 @@ type messages struct {
 	FailedSaveConfig  string
 	Starting          string
 	InvalidAuthKey    string
+	InvalidTarget     string
+	MsgRequired       string
+	CommandTooLong    string
+	BatchEmpty        string
+	BatchTooMany      string
+	BatchTimeout      string
 	FailedConnectRCON string
 	FailedExecRCON    string
 	FailedReadRCON    string
-	RCONIDMismatch    string
 	MethodNotAllowed  string
 	ListenFailed      string
 	ShuttingDown      string
@@ -61,12 +66,17 @@ var msgMap = map[lang]messages{
 		YourAuthKey:       "你的 AuthKey: %s",
 		KeepAuthKeySafe:   "请妥善保管你的 AuthKey！",
 		FailedSaveConfig:  "保存配置失败: %v",
-		Starting:          "ICURconDaemon v%s 启动于 :%s",
+		Starting:          "ICURconDaemon %s 启动于 :%s",
 		InvalidAuthKey:    "无效的认证密钥",
+		InvalidTarget:     "ip/port/passwd 参数缺失或无效",
+		MsgRequired:       "缺少 msg 参数",
+		CommandTooLong:    "命令太长（上限 %d 字节）",
+		BatchEmpty:        "msgs 不能为空",
+		BatchTooMany:      "msgs 最多 %d 条",
+		BatchTimeout:      "批量请求超时",
 		FailedConnectRCON: "连接RCON服务器失败: %v",
 		FailedExecRCON:    "执行RCON命令失败: %v",
 		FailedReadRCON:    "读取RCON消息失败: %v",
-		RCONIDMismatch:    "RCON响应ID不匹配",
 		MethodNotAllowed:  "仅支持 POST 请求",
 		ListenFailed:      "服务启动失败: %v",
 		ShuttingDown:      "正在退出，等待连接收尾…",
@@ -81,12 +91,17 @@ var msgMap = map[lang]messages{
 		YourAuthKey:       "Your AuthKey: %s",
 		KeepAuthKeySafe:   "Please keep your AuthKey safe!",
 		FailedSaveConfig:  "Failed to save config: %v",
-		Starting:          "ICURconDaemon v%s starting on :%s",
+		Starting:          "ICURconDaemon %s starting on :%s",
 		InvalidAuthKey:    "Invalid authentication key",
+		InvalidTarget:     "ip/port/passwd are missing or invalid",
+		MsgRequired:       "msg is required",
+		CommandTooLong:    "Command too long (max %d bytes)",
+		BatchEmpty:        "msgs must be a non-empty array",
+		BatchTooMany:      "at most %d commands",
+		BatchTimeout:      "batch request timed out",
 		FailedConnectRCON: "Failed to connect to RCON server: %v",
 		FailedExecRCON:    "Failed to execute RCON command: %v",
 		FailedReadRCON:    "Failed to read RCON message: %v",
-		RCONIDMismatch:    "RCON ID mismatch",
 		MethodNotAllowed:  "Only POST is supported",
 		ListenFailed:      "Failed to start server: %v",
 		ShuttingDown:      "Shutting down, draining connections…",
@@ -95,5 +110,10 @@ var msgMap = map[lang]messages{
 }
 
 func t() messages {
-	return msgMap[currentLang]
+	if m, ok := msgMap[currentLang]; ok {
+		return m
+	}
+	// Uninitialised language (for example in tests) falls back to English
+	// rather than the zero value, which would emit empty messages.
+	return msgMap[langEN]
 }

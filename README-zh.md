@@ -31,6 +31,7 @@
   - [servers.json](#serversjson)
   - [常见问题与错误处理](#常见问题与错误处理)
 - [完整图文教程](docs/使用教程.md)
+- [v1.2.0 优化说明](#v120-优化说明)
 - [v1.1.0 优化说明](#v110-优化说明)
 - [开发与测试](#开发与测试)
 - [许可证](#许可证)
@@ -41,12 +42,15 @@
 
 ### 特性
 
-- 将 RCON 协议转为 HTTP REST API（单接口，零配置即可对接）
+- 将 RCON 协议转为 HTTP REST API（单条命令 + 批量接口，零配置即可对接）
+- **批量模式**：一次 HTTP 请求、一条 RCON 连接跑最多 8 条只读命令
+- **完整的多包响应处理**（100KB+ 响应、结束标记 + 静默间隔兜底）
+- **响应压缩**：按 `Accept-Encoding` 可选 `zstd` / `br` / `gzip`（不传该头则始终不压缩）
 - 首次运行交互式配置（端口和认证密钥），保存到 `config.ini` 后续自动加载
 - 自动生成 UUID v4 作为认证密钥（也可自定义）
 - 多语言支持：自动检测系统语言（中文/英文），**Windows 下也能正确识别中文系统**
 - 跨平台：Windows & Linux，`CGO_ENABLED=0` 即可交叉编译
-- **零第三方依赖**（v1.1.0 起仅使用 Go 标准库）
+- **依赖精简**：v1.2.0 起仅增加两个纯 Go 压缩库（`andybalholm/brotli`、`klauspost/compress`），其余均为标准库
 
 ### 快速开始
 
@@ -88,7 +92,12 @@ authkey=你的认证密钥
 
 ### HTTP API
 
-接口自 v1.0.0 起**保持不变**：
+两个 POST 接口共用同一组目标字段。单条命令接口自 v1.0.0 起保持兼容，v1.2.0 新增批量接口。
+
+两个接口都会在请求头声明支持时压缩 JSON 响应：`zstd`、`br`、`gzip`（按 q 值择优）。
+压缩严格按需开启——不传 `Accept-Encoding` 时始终返回明文，因此旧客户端和 ICU 后端不受影响；
+响应小于 1KB 或压缩后反而变大时同样返回明文。所有响应带 `Vary: Accept-Encoding`；若请求同时
+拒绝 identity 和全部受支持编码，返回 `406 Not Acceptable`。
 
 #### `POST /api/icu/daemon/rcon`
 
@@ -126,12 +135,55 @@ curl -X POST http://127.0.0.1:8080/api/icu/daemon/rcon \
   -d '{"ip":"127.0.0.1","port":25575,"passwd":"rcon密码","msg":"list","auth":"你的认证密钥"}'
 ```
 
-### 从源码构建
+#### `POST /api/icu/daemon/rcon/batch`
 
-需要 Go 1.21+，无任何第三方依赖：
+用**一条** RCON 连接执行最多 8 条命令：需要多个只读值时只发一次 HTTP 请求。
+适用于 `listplayers` / `gamemodeproperty` / `listgamemodeproperties`；
+`kick`、`ban`、`say` 这类有副作用的命令请走单条接口。
+
+请求体：
+
+```json
+{
+  "ip": "127.0.0.1",
+  "port": 25575,
+  "passwd": "rcon密码",
+  "auth": "你的认证密钥",
+  "msgs": ["listplayers", "gamemodeproperty NumPlayers"]
+}
+```
+
+响应（HTTP 200）：
+
+```json
+{
+  "status": 1,
+  "results": [
+    { "status": 1, "msg": "ID\t | Name ..." },
+    { "status": 1, "msg": "NumPlayers = \"8\"" }
+  ]
+}
+```
+
+- `results` 长度与 `msgs` **完全一致**、顺序一一对应：`results[i]` 对应 `msgs[i]`。
+- 单条命令失败只把该条标为 `status: 0`，**不会**中断后续命令。
+- 连接中途断开时，已执行命令照常返回，未执行的标记为 `status: 0`。
+- 参数错误或 AuthKey 错误返回 `{"status":0,"msg":"..."}`（不带 `results`）。
+- 整批请求预算 8 秒，超时仍未完成的命令标记失败。
+- 仅接受 POST；未知路径返回 `404`，调用方可据此探测并退回逐条请求。
 
 ```bash
-go build -trimpath -ldflags "-s -w -X main.Version=v1.1.0" -o ICURconDaemon .
+curl -X POST http://127.0.0.1:8080/api/icu/daemon/rcon/batch \
+  -H "Content-Type: application/json" \
+  -d '{"ip":"127.0.0.1","port":25575,"passwd":"rcon密码","auth":"你的认证密钥","msgs":["listplayers","gamemodeproperty NumPlayers"]}'
+```
+
+### 从源码构建
+
+需要 Go 1.21+。v1.2.0 起仅新增两个纯 Go 压缩库（`andybalholm/brotli`、`klauspost/compress`），其余均为标准库：
+
+```bash
+go build -trimpath -ldflags "-s -w -X main.Version=v1.2.0" -o ICURconDaemon .
 ```
 
 ---
@@ -152,10 +204,12 @@ go build -trimpath -ldflags "-s -w -X main.Version=v1.1.0" -o ICURconDaemon .
   - 命令历史（每服务器独立保存最近 200 条，点击历史条目回填命令）
   - 实时输出（带时间戳、耗时毫秒数；命令/返回/错误/系统四种颜色区分）
   - 点击任意输出行复制该行；支持“复制全部”和“清屏”
+- **大响应流畅滚动**：100KB+ 多包响应拆成显示行，只排版可视区域，滚动不再卡顿
   - **强制停止**：命令执行期间「发送」按钮变为红色「停止」，点击可中断卡死的请求
   - **连接测试**：发送 `help` 命令验证链路（几乎所有 RCON 实现都支持且无副作用）
 - **明暗主题**：自动跟随系统深浅色模式，也可点击左下角按钮手动切换（选择会保存）
 - **错误处理**：连接失败、认证失败、超时、非法端口、JSON 损坏等情况均有明确的界面提示，`servers.json` 损坏时自动备份并重建
+- **健壮的 RCON 读写**：直连模式完整拼接多包响应（100KB+），按结束标记或静默间隔判定结束；连接断开时明确报错而不是一直转圈
 - **中英双语**：跟随系统语言，可一键切换
 - **跨平台**：Windows / Linux 提供 Release 版（Linux 构建基于 Ubuntu 22.04，要求 glibc ≥ 2.35）；macOS 在目标系统上构建后可用
 
@@ -254,9 +308,25 @@ Windows 版使用 `-H=windowsgui` 构建，启动后**不弹出黑色控制台�
 | `HTTP 400: invalid character ...` | 请求体异常（极少见）；多为中间代理损坏了请求 |
 | `认证时返回了不可用的数据` | 对端不是标准 Source RCON 服务（某些 mod 的 RCON 实现不标准），或端口填成了非 RCON 服务 |
 | 客户端启动后列表为空 | `servers.json` 被删除或损坏，查看同目录的 `servers.json.corrupt-*` 备份 |
-| Daemon 模式下命令一直无返回 | RCON 命令耗时过长（如整存整取）；守护进程最长等待 2 分钟，客户端最长等待 140 秒 |
+| Daemon 模式下命令一直无返回 | 单条命令最长等待 2 分钟；若服务器完全不回包，约 2 秒后按空响应返回。批量接口整批预算 8 秒 |
 
 ---
+
+## v1.2.0 优化说明
+
+在**完全保持原 `POST /api/icu/daemon/rcon` 请求/响应契约不变**的前提下：
+
+- **新增批量接口** `POST /api/icu/daemon/rcon/batch`：最多 8 条命令共用一条 RCON 连接、一次 HTTP 请求，整批 8 秒预算，按位置返回每条结果；单条失败不中断后续，连接断开时剩余命令标记失败
+- **修复多包响应**：服务器按包拆分的响应（Sandstorm 的 `listgamemodeproperties` 为 28–31 个包、90–120KB）会完整拼接，不再只返回第一个约 4KB 的包
+- **修复结束标记竞态**：空 `RESPONSE_VALUE` 标记改为**收到第一个响应包之后**才发送，Sandstorm 无法再把它提前镜像回来（旧实现下 `listplayers` 偶尔返回 0 字节）；对不回应标记的服务器，用“首包 2 秒 + 之后静默 800ms”兜底
+- **连接复用排空**：批量中上一条命令超时后，下一条命令前先排空残留包，避免串包
+- **协议限制对齐**：命令上限 1446 字节、单包 64KB、单条响应 4MB、支持 IPv6、连接/认证/命令全程有超时
+- **HTTP 响应压缩**：按 `Accept-Encoding` 协商 `zstd` / `br` / `gzip`，支持 q 值、通配符、`Vary`、`Content-Length`、最小体积阈值，压缩后反而变大时自动回退 identity；120KB 的 `listgamemodeproperties` 上线路后通常只剩几 KB
+- **桌面客户端**：直连模式使用同一套多包算法，Daemon 模式响应不再被 1MB 上限截断；Daemon 请求会发送 `Accept-Encoding: zstd, br, gzip`，三种编码均可解压
+- **大输出不再卡顿**：RCON 响应按换行和固定字符数拆成显示行，列表只排版可视区域——120KB 无换行的 `listplayers` 也不会再拖垮滚动；同时按服务器设置文本字节预算，避免日志无限增长
+- **逐行复制**：点击任意输出行复制该行内容，「复制全部」仍可复制完整会话；拆分不丢失任何数据
+- **连接测试日志完全本地化**：英文界面不再出现中文系统提示
+- **教程截图重制**：使用 Gio headless 渲染生成，无黑边；英文教程使用英文界面截图
 
 ## v1.1.0 优化说明
 
@@ -277,13 +347,18 @@ Windows 版使用 `-H=windowsgui` 构建，启动后**不弹出黑色控制台�
 ## 开发与测试
 
 ```bash
-# 守护进程：构建 + 全量测试（协议单元测试 + HTTP 端到端测试）
+# 守护进程：构建 + 全量测试
+#（多包/结束标记/静默间隔协议测试 + 单条/批量 HTTP + 压缩协商）
 go build ./... && go test ./... -count=1
 
-# 客户端：构建（无 GUI 逻辑自测）
+# 客户端：协议测试（无需图形环境）+ 构建
 cd client
-go test ./... -count=1        # 需要图形环境时可跳过，store 纯逻辑可在任意环境运行
+go test ./... -count=1
 go build -trimpath -ldflags "-s -w -H=windowsgui" -o ../ICURconClient.exe .
+
+# 重新生成教程截图（headless，中文 + 英文）
+cd client
+ICU_GEN_SCREENSHOTS=1 go test -run TestGenerateDocScreenshots -count=1
 ./ICURconClient --selftest    # 无窗口自检（store 持久化 / UUID）
 ```
 
@@ -293,7 +368,7 @@ go build -trimpath -ldflags "-s -w -H=windowsgui" -o ../ICURconClient.exe .
 # Debian/Ubuntu 依赖
 sudo apt install libgl1-mesa-dev xorg-dev
 cd client
-go build -trimpath -ldflags "-s -w -X main.clientVersion=v1.1.0" -o ../ICURconClient .
+go build -trimpath -ldflags "-s -w -X main.clientVersion=v1.2.0" -o ../ICURconClient .
 ```
 
 ---
@@ -302,3 +377,4 @@ go build -trimpath -ldflags "-s -w -X main.clientVersion=v1.1.0" -o ../ICURconCl
 
 - 本项目代码：[MIT](LICENSE)
 - 客户端内嵌字体 [Noto Sans SC](https://fonts.google.com/noto/specimen/Noto+Sans+SC)：[SIL Open Font License 1.1](client/assets/fonts/OFL.txt)
+- 压缩库：[andybalholm/brotli](https://github.com/andybalholm/brotli)（Brotli Authors，MIT 风格）与 [klauspost/compress](https://github.com/klauspost/compress)（BSD-3-Clause）

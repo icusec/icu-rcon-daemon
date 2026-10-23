@@ -18,7 +18,7 @@ import (
 )
 
 // clientVersion is overridden at release build time via -ldflags.
-var clientVersion = "v1.1.0"
+var clientVersion = "v1.2.0"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--selftest" {

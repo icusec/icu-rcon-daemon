@@ -38,21 +38,22 @@ This is worth understanding before you deploy, because it is the whole security 
 
 **The daemon does not recognize bad commands. It never sees an untrusted command at all.**
 
-- Only one route exists — `POST /api/icu/daemon/rcon`. Every other path is a plain 404.
+- Two routes exist — `POST /api/icu/daemon/rcon` for one command and
+  `POST /api/icu/daemon/rcon/batch` for up to 8. Every other path is a plain 404.
 - Every request must carry the AuthKey, and that check happens **before** the daemon opens
   any socket to RCON. A wrong key is dropped, so the game server's RCON handler never
   receives those bytes.
 - An empty or missing AuthKey in `config.ini` is treated as "not configured": the daemon
   re-runs the first-run wizard instead of serving with a key that would accept everything.
 - After authentication the daemon applies protocol hygiene: POST only, a 64 KB request-body
-  cap, a 1014-byte command cap, bounded packet reads, request-ID matching and full server
-  timeouts.
+  cap, a 1446-byte command cap, bounded packet reads, multi-packet reassembly and full
+  server timeouts.
 
 Concretely, here is what happens to things people send at the port:
 
 | What arrives | What the daemon does |
 |---|---|
-| Anything other than `POST` on the endpoint | `405 Only POST is supported` |
+| Anything other than `POST` on either endpoint | `405 Only POST is supported` |
 | A body that is not valid JSON, or larger than 64 KB | `400` — rejected before any RCON field is even looked at |
 | Any other path (`/`, `/rcon`, scanner noise) | `404` |
 | Valid JSON, wrong `auth` | `{"status":0,"msg":"Invalid authentication key"}`, and **no RCON connection is opened** |
@@ -81,7 +82,7 @@ nobody on the other side of the door to send them.
    Config saved to config.ini
    Your AuthKey: 3f7a2c64-8d21-4e5b-9c77-a1b2c3d4e5f6
    Please keep your AuthKey safe!
-   ICURconDaemon v1.1.0 starting on :8080
+   ICURconDaemon v1.2.0 starting on :8080
    ```
 
    Pressing Enter twice is the recommended path: port `8080`, and a strong random UUID v4
@@ -145,8 +146,23 @@ If `status` is `0`, the `msg` field tells you which hop failed. Every successful
 leaves a line in the daemon log:
 
 ```text
-2026/10/15 01:36:20 127.0.0.1:25575 <- "help" (16ms)
+2026/10/15 01:36:20 127.0.0.1:25575 <- "help" (16ms, 123 bytes)
 ```
+
+To check the batch path (one connection, several read-only commands):
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/api/icu/daemon/rcon/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"ip":"127.0.0.1","port":25575,"passwd":"your-rcon-password","auth":"your-authkey","msgs":["listplayers","gamemodeproperty NumPlayers"]}'
+```
+
+The response contains a `results` array in the same order as `msgs`. A command that fails
+gets `status: 0` in its own entry; the rest still run.
+
+Both endpoints compress their JSON when the request advertises `Accept-Encoding`
+(`zstd`, `br` or `gzip`). `curl --compressed` negotiates and decodes automatically; without
+the header the daemon answers with plain JSON, so old clients keep working.
 
 A request with the wrong key is logged and rejected:
 
@@ -181,18 +197,18 @@ installation:
   (the CI build targets glibc ≥ 2.35, i.e. Ubuntu 22.04+, Debian 12+).
 - **macOS**: no prebuilt binary; build it from source as described in the README.
 
-> The screenshots below show the Simplified-Chinese build. The UI is bilingual — it follows
+> The screenshots below show the English UI. The UI is bilingual — it follows
 > the system locale and can be switched at the bottom-left corner.
 
 ### Adding a server
 
 The first launch shows an empty list:
 
-![Empty client](img/tutorial-empty.png)
+![Empty client](img/en/tutorial-empty.png)
 
 Click **＋ Add Server** and fill in:
 
-![Adding a server](img/tutorial-add.png)
+![Adding a server](img/en/tutorial-add.png)
 
 | Field | Meaning |
 |---|---|
@@ -211,7 +227,7 @@ Double-click the card (or use **Test Connection**). The client sends `help`, whi
 side-effect free and supported by virtually every RCON implementation. On success the top
 bar turns green with the round-trip time:
 
-![Connected](img/tutorial-connected.png)
+![Connected](img/en/tutorial-connected.png)
 
 ### Running commands
 
@@ -222,7 +238,9 @@ Type into the bottom input (for example `list`, `say hello`, `whitelist add Stev
   RCON replies from interleaving.
 - Output is shown live with timestamps and round-trip milliseconds, color-coded into
   command / response / error / system lines. Click any line to copy it; **Copy All** and
-  **Clear** are next to the output.
+  **Clear** are next to the output. Large replies (for example a 100 KB+
+  `listgamemodeproperties`) are split into display rows, so scrolling stays smooth and each
+  individual line can be copied.
 - Every command is appended to that server's history (last 200). Use the ▲▼ buttons or the
   arrow keys to recall one, or click an entry in the history column.
 - If a command hangs, the **Send** button turns into a red **Stop** button that aborts the
@@ -234,7 +252,7 @@ Type into the bottom input (for example `list`, `say hello`, `whitelist add Stev
   sit below the list; deletion asks for confirmation.
 - All changes are saved to `servers.json` immediately.
 - The bottom-left corner toggles the UI language and the light/dark theme. The theme follows
-  the system by default, and both choices are remembered.
+  the system by default, and the theme choice is remembered.
 
 ---
 

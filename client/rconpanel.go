@@ -41,6 +41,10 @@ func (u *ui) layoutOutput(gtx layout.Context, s *ServerEntry) layout.Dimensions 
 						t.Font.Weight = font.Bold
 						return t.Layout(gtx)
 					}),
+					layout.Rigid(space(gtx.Dp(10))),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return label(u.th, unit.Sp(10.5), L.CopyHint, colTextFaint).Layout(gtx)
+					}),
 					// Flexible spacer: must return its allotted width, or the
 					// widgets after it pack against the previous child.
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -58,20 +62,14 @@ func (u *ui) layoutOutput(gtx layout.Context, s *ServerEntry) layout.Dimensions 
 		}),
 		// Log lines
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			logs := u.net.logsFor(s.ID)
-			if len(logs) == 0 {
+			rows := u.net.rowsFor(s.ID)
+			if len(rows) == 0 {
 				lb := label(u.th, unit.Sp(12), outputHint(L), colTextFaint)
 				lb.Alignment = text.Middle
 				return layout.Inset{Left: unit.Dp(24), Right: unit.Dp(24)}.Layout(gtx, lb.Layout)
 			}
-			if len(u.logClicks) != len(logs) {
-				u.logClicks = make([]*widget.Clickable, len(logs))
-				for i := range u.logClicks {
-					u.logClicks[i] = &widget.Clickable{}
-				}
-			}
-			return material.List(u.th, &u.outList).Layout(gtx, len(logs), func(gtx layout.Context, i int) layout.Dimensions {
-				return u.layoutLogLine(gtx, logs[i], u.logClicks[i])
+			return material.List(u.th, &u.outList).Layout(gtx, len(rows), func(gtx layout.Context, i int) layout.Dimensions {
+				return u.layoutLogRow(gtx, rows[i], u.logClick(i))
 			})
 		}),
 		// breathing room above the input bar
@@ -82,12 +80,26 @@ func (u *ui) layoutOutput(gtx layout.Context, s *ServerEntry) layout.Dimensions 
 }
 
 func outputHint(L uiStrings) string {
-	return "点击「测试连接」验证可达性；输入命令后回车执行。\n" +
-		"点击任意输出行可复制其内容。"
+	return L.OutputHint
 }
 
-func (u *ui) layoutLogLine(gtx layout.Context, line logLine, c *widget.Clickable) layout.Dimensions {
-	col, prefix := lineColor(line.Kind)
+// logClick lazily creates the clickable for a display row. Only visible rows
+// are ever requested, so a huge response never allocates clickables for the
+// whole scrollback.
+func (u *ui) logClick(i int) *widget.Clickable {
+	if c, ok := u.logClicks[i]; ok {
+		return c
+	}
+	c := &widget.Clickable{}
+	u.logClicks[i] = c
+	return c
+}
+
+// layoutLogRow draws one display row. A long RCON response is split into rows
+// by the service, so the list only shapes the text that is actually visible.
+// Clicking a row copies that row's text; "Copy All" still copies everything.
+func (u *ui) layoutLogRow(gtx layout.Context, row logViewRow, c *widget.Clickable) layout.Dimensions {
+	col, prefix := lineColor(row.Kind)
 
 	content := func(gtx layout.Context) layout.Dimensions {
 		m := op.Record(gtx.Ops)
@@ -97,17 +109,41 @@ func (u *ui) layoutLogLine(gtx layout.Context, line logLine, c *widget.Clickable
 			return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(16), Right: unit.Dp(14)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						t := label(u.th, unit.Sp(11), line.At.Format("15:04:05"), colTextFaint)
-						return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, t.Layout)
-					}),
-					layout.Rigid(space(gtx.Dp(10))),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						txt := prefix + line.Text
-						if line.MS > 0 {
-							txt += "   (" + strconv.Itoa(int(line.MS)) + "ms)"
+						// Fixed timestamp gutter: continuation rows align with
+						// the text of the entry's first row.
+						w := gtx.Dp(58)
+						if !row.First {
+							return layout.Dimensions{Size: image.Pt(w, 0)}
 						}
-						t := label(u.th, unit.Sp(13), txt, col)
-						return t.Layout(gtx)
+						t := label(u.th, unit.Sp(11), row.At.Format("15:04:05"), colTextFaint)
+						d := layout.Inset{Top: unit.Dp(2), Right: unit.Dp(10)}.Layout(gtx, t.Layout)
+						if d.Size.X > w {
+							w = d.Size.X
+						}
+						return layout.Dimensions{Size: image.Pt(w, d.Size.Y)}
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						// Fixed prefix gutter, so continuation rows keep the
+						// same left edge as the first row.
+						w := gtx.Dp(18)
+						if !row.First {
+							return layout.Dimensions{Size: image.Pt(w, 0)}
+						}
+						d := label(u.th, unit.Sp(13), prefix, col).Layout(gtx)
+						if d.Size.X > w {
+							w = d.Size.X
+						}
+						return layout.Dimensions{Size: image.Pt(w, d.Size.Y)}
+					}),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						txt := row.Text
+						if txt == "" {
+							txt = " "
+						}
+						if row.First && row.MS > 0 {
+							txt += "   (" + strconv.Itoa(int(row.MS)) + "ms)"
+						}
+						return label(u.th, unit.Sp(13), txt, col).Layout(gtx)
 					}),
 				)
 			})

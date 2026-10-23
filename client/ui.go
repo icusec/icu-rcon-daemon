@@ -60,9 +60,9 @@ type ui struct {
 	input        widget.Editor
 	outList      widget.List
 	histList     widget.List
-	logClicks    []*widget.Clickable
+	logClicks    map[int]*widget.Clickable
 	histClicks   []*widget.Clickable
-	histIdx      int      // -1 = live input; else index into history
+	histIdx      int // -1 = live input; else index into history
 	histDraft    string
 	follow       bool // autoscroll output to bottom
 
@@ -98,12 +98,13 @@ type ui struct {
 
 func newUI(w *app.Window) *ui {
 	u := &ui{
-		w:        w,
-		th:       newTheme(),
-		L:        stringsFor(currentLang()),
-		cardBtns: map[string]*widget.Clickable{},
-		follow:   true,
-		histIdx:  -1,
+		w:         w,
+		th:        newTheme(),
+		L:         stringsFor(currentLang()),
+		cardBtns:  map[string]*widget.Clickable{},
+		logClicks: map[int]*widget.Clickable{},
+		follow:    true,
+		histIdx:   -1,
 	}
 	u.sidebarList.Axis = layout.Vertical
 	u.outList.Axis = layout.Vertical
@@ -147,6 +148,11 @@ func (u *ui) reloadStore(want string) {
 	if sel == "" && len(u.servers) > 0 {
 		sel = u.servers[0].ID
 	}
+	if sel != u.sel {
+		// Row indexes are per server; stale hover/click state would otherwise
+		// attach to unrelated rows after a selection change.
+		u.logClicks = map[int]*widget.Clickable{}
+	}
 	u.sel = sel
 
 	alive := map[string]bool{}
@@ -162,7 +168,9 @@ func (u *ui) reloadStore(want string) {
 		}
 	}
 	u.syncHistClicks()
-	u.w.Invalidate()
+	if u.w != nil {
+		u.w.Invalidate()
+	}
 }
 
 func (u *ui) selected() *ServerEntry {
@@ -182,7 +190,7 @@ func (u *ui) selectServer(id string) {
 	u.histIdx = -1
 	u.histDraft = ""
 	u.follow = true
-	u.logClicks = nil
+	u.logClicks = map[int]*widget.Clickable{}
 	if id != "" {
 		u.st.setLastSelected(id)
 	}
@@ -192,7 +200,9 @@ func (u *ui) selectServer(id string) {
 func (u *ui) toastMsg(s string) {
 	u.toast = s
 	u.toastAt = time.Now()
-	time.AfterFunc(2*time.Second, u.w.Invalidate)
+	if u.w != nil {
+		time.AfterFunc(2*time.Second, u.w.Invalidate)
+	}
 }
 
 func (u *ui) copyText(gtx layout.Context, s string) {
@@ -279,7 +289,7 @@ func (u *ui) handleEvents(gtx layout.Context) {
 	}
 	if clicked(&u.btnClearOut, gtx) {
 		u.net.clearLogs(u.sel)
-		u.logClicks = nil
+		u.logClicks = map[int]*widget.Clickable{}
 	}
 	if clicked(&u.btnClearHist, gtx) {
 		if u.sel != "" {
@@ -333,11 +343,22 @@ func (u *ui) handleEvents(gtx layout.Context) {
 		}
 	}
 
-	// Log line click = copy that line.
-	logs := u.net.logsFor(u.sel)
-	for i, c := range u.logClicks {
-		if i < len(logs) && clicked(c, gtx) {
-			u.copyText(gtx, logs[i].Text)
+	// Log row clicks. Only rows visible in the last frame have a clickable;
+	// iterating every row of a large scrollback would defeat the list's
+	// virtualization and make each frame O(total rows).
+	rows := u.net.rowsFor(u.sel)
+	first := u.outList.Position.First
+	last := first + u.outList.Position.Count
+	if first < 0 {
+		first = 0
+	}
+	if last > len(rows) {
+		last = len(rows)
+	}
+	for i := first; i < last; i++ {
+		if c, ok := u.logClicks[i]; ok && clicked(c, gtx) {
+			u.copyText(gtx, rows[i].Text)
+			break
 		}
 	}
 
@@ -490,7 +511,7 @@ func (u *ui) layout(gtx layout.Context) {
 	if u.warn != "" {
 		bottom := gtx.Constraints.Max
 		h := gtx.Dp(24)
-		fillRect(gtx, image.Rectangle{Min: image.Pt(0, bottom.Y - h), Max: bottom}, 0, colYellow)
+		fillRect(gtx, image.Rectangle{Min: image.Pt(0, bottom.Y-h), Max: bottom}, 0, colYellow)
 		defer op.Offset(image.Pt(gtx.Dp(10), bottom.Y-h+gtx.Dp(4))).Push(gtx.Ops).Pop()
 		label(u.th, unit.Sp(11), u.warn, colBg).Layout(gtx)
 	}
@@ -857,4 +878,3 @@ func (u *ui) lastLatency() int64 {
 	}
 	return 0
 }
-

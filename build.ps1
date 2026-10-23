@@ -8,7 +8,7 @@ param(
     [switch]$Daemon,
     [switch]$Client,
     [switch]$Linux,
-    [string]$Version = "v1.1.0"
+    [string]$Version = "v1.2.0"
 )
 
 $ErrorActionPreference = "Stop"

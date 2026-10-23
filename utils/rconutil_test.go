@@ -1,38 +1,38 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
 
-// fakeRCONServer is a minimal Source RCON server for tests. It answers auth
-// packets with an auth response (echoing the request id on success, -1 on
-// failure) and replies to exec packets with "OK:<body>".
-type fakeRCONServer struct {
-	ln       net.Listener
-	password string
-	// coalesce makes the server prepend a stray RESPONSE_VALUE packet to every
-	// reply and send both in a single write, exercising the "stray packet
-	// before the expected reply" behaviour of some RCON servers.
-	coalesce bool
-	// bigReply makes the server reply with a payload of ~40KB, exceeding one
-	// TCP segment.
-	bigReply bool
-	// oversize makes the server announce a packet larger than readBufferSize.
-	oversize bool
+// testServer is a configurable Source RCON server used by the protocol tests.
+type testServer struct {
+	password   string
+	reply      func(cmd string) []byte // nil means "send no reply"
+	chunk      int                     // >0 splits each reply into packets of at most chunk bytes
+	mirror     bool                    // mirror empty type-0 packets like Sandstorm
+	strayAuth  bool                    // send a stray packet before the auth reply
+	stallAuth  bool                    // never answer the auth request
+	closeOnCmd string                  // close the connection when this command arrives
+	truncOnCmd string                  // send only the first chunk, then close
+	delayCmd   string                  // delay the reply of this command
+	delay      time.Duration
+	oversize   bool // announce an oversized packet for every command
+	badSize    bool // announce a malformed size for every command
 }
 
-func startFakeRCON(t *testing.T, s *fakeRCONServer) string {
+func startTestServer(t *testing.T, s *testServer) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	s.ln = ln
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -46,200 +46,406 @@ func startFakeRCON(t *testing.T, s *fakeRCONServer) string {
 	return ln.Addr().String()
 }
 
-func (s *fakeRCONServer) serve(conn net.Conn) {
+func (s *testServer) serve(conn net.Conn) {
 	defer conn.Close()
 	for {
-		packet, err := readPacket(conn)
+		reqid, typ, body, err := readTestPacket(conn)
 		if err != nil {
 			return
 		}
-		reqid := int32(binary.LittleEndian.Uint32(packet[0:4]))
-		typ := int32(binary.LittleEndian.Uint32(packet[4:8]))
-		body := packet[8:]
-		if i := indexByte0(body); i >= 0 {
-			body = body[:i]
-		}
 		switch typ {
 		case cmdAuth:
-			ok := string(body) == s.password
-			rid := reqid
-			if !ok {
-				rid = -1
+			if s.stallAuth {
+				continue
 			}
-			resp := buildPacket(rid, respAuthResponse, "")
-			if ok && s.coalesce {
-				resp = append(buildPacket(reqid, respResponse, "stray"), resp...)
-			}
-			if _, err := conn.Write(resp); err != nil {
-				return
-			}
-		case cmdExecCommand:
-			body2 := []byte("OK:" + string(body))
-			if s.bigReply {
-				body2 = make([]byte, 40000)
-				for i := range body2 {
-					body2[i] = byte('a' + i%26)
+			if s.strayAuth {
+				if writeTestPacket(conn, reqid, respResponse, nil) != nil {
+					return
 				}
 			}
-			if s.oversize {
-				body2 = make([]byte, readBufferSize+100)
+			rid := reqid
+			if string(body) != s.password {
+				rid = -1
 			}
-			resp := buildPacket(reqid, respResponse, string(body2))
-			if _, err := conn.Write(resp); err != nil {
+			if writeTestPacket(conn, rid, respAuthResponse, nil) != nil {
+				return
+			}
+		case respResponse: // client's empty end marker
+			if s.mirror {
+				if writeTestPacket(conn, reqid, respResponse, nil) != nil {
+					return
+				}
+			}
+		case cmdExecCommand:
+			cmd := string(body)
+			if s.closeOnCmd == cmd {
+				return
+			}
+			if s.oversize {
+				writeRawSize(conn, maxPacketBytes+1)
+				return
+			}
+			if s.badSize {
+				writeRawSize(conn, 4)
+				return
+			}
+			if s.delayCmd == cmd && s.delay > 0 {
+				time.Sleep(s.delay)
+			}
+			var payload []byte
+			if s.reply != nil {
+				payload = s.reply(cmd)
+			}
+			if payload == nil {
+				continue
+			}
+			parts := splitTestPayload(payload, s.chunk)
+			if s.truncOnCmd == cmd {
+				parts = parts[:1]
+			}
+			for _, part := range parts {
+				if writeTestPacket(conn, reqid, respResponse, part) != nil {
+					return
+				}
+			}
+			if s.truncOnCmd == cmd {
 				return
 			}
 		}
 	}
 }
 
-// pending holds an unsent auth reply (coalesce mode).
-
-func readPacket(conn net.Conn) ([]byte, error) {
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+func readTestPacket(conn net.Conn) (int32, int32, []byte, error) {
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var sizeBuf [4]byte
 	if _, err := io.ReadFull(conn, sizeBuf[:]); err != nil {
-		return nil, err
+		return 0, 0, nil, err
 	}
 	size := int(int32(binary.LittleEndian.Uint32(sizeBuf[:])))
 	if size < 10 || size > 1<<20 {
-		return nil, errors.New("bad size")
+		return 0, 0, nil, errors.New("bad packet size")
 	}
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		return nil, err
+		return 0, 0, nil, err
 	}
-	return buf, nil
+	return int32(binary.LittleEndian.Uint32(buf[0:4])), int32(binary.LittleEndian.Uint32(buf[4:8])), trimTestNUL(buf[8:]), nil
 }
 
-func buildPacket(reqid, typ int32, body string) []byte {
+func writeTestPacket(conn net.Conn, reqid, typ int32, body []byte) error {
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	out := make([]byte, 14+len(body))
 	binary.LittleEndian.PutUint32(out[0:], uint32(10+len(body)))
 	binary.LittleEndian.PutUint32(out[4:], uint32(reqid))
 	binary.LittleEndian.PutUint32(out[8:], uint32(typ))
 	copy(out[12:], body)
+	_, err := conn.Write(out)
+	return err
+}
+
+func writeRawSize(conn net.Conn, size int) {
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], uint32(int32(size)))
+	_, _ = conn.Write(buf[:])
+}
+
+func trimTestNUL(b []byte) []byte {
+	if i := bytes.IndexByte(b, 0); i >= 0 {
+		return b[:i]
+	}
+	return b
+}
+
+func splitTestPayload(payload []byte, chunk int) [][]byte {
+	if len(payload) == 0 {
+		return [][]byte{{}}
+	}
+	if chunk <= 0 || len(payload) <= chunk {
+		return [][]byte{payload}
+	}
+	var out [][]byte
+	for len(payload) > 0 {
+		n := chunk
+		if n > len(payload) {
+			n = len(payload)
+		}
+		out = append(out, payload[:n])
+		payload = payload[n:]
+	}
 	return out
 }
 
-func indexByte0(b []byte) int {
-	for i, c := range b {
-		if c == 0 {
-			return i
-		}
+func testPayload(n int) []byte {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = alphabet[i%len(alphabet)]
 	}
-	return -1
+	return b
 }
 
-func TestDialAndExec(t *testing.T) {
-	s := &fakeRCONServer{password: "secret"}
-	addr := startFakeRCON(t, s)
+// fastConfig keeps the quiet-gap tests quick while exercising the same paths.
+func fastConfig() Config {
+	return Config{
+		DialTimeout:        2 * time.Second,
+		AuthTimeout:        2 * time.Second,
+		FirstPacketTimeout: 250 * time.Millisecond,
+		QuietGap:           100 * time.Millisecond,
+	}
+}
 
-	c, err := Dial(addr, "secret")
+func dialTest(t *testing.T, s *testServer) *RemoteConsole {
+	t.Helper()
+	addr := startTestServer(t, s)
+	c, err := DialWithConfig(addr, s.password, fastConfig())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.Close()
+	t.Cleanup(func() { c.Close() })
+	return c
+}
 
-	id, err := c.Write("say hi")
-	if err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	resp, rid, err := c.Read()
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if rid != id || resp != "OK:say hi" {
-		t.Fatalf("got resp=%q rid=%d want rid=%d", resp, rid, id)
-	}
+func TestExecBasic(t *testing.T) {
+	c := dialTest(t, &testServer{
+		password: "secret",
+		mirror:   true,
+		reply:    func(cmd string) []byte { return []byte("OK:" + cmd) },
+	})
 
-	// Second command on the same connection must work too.
-	id2, _ := c.Write("list")
-	resp2, rid2, err := c.Read()
-	if err != nil || rid2 != id2 || resp2 != "OK:list" {
-		t.Fatalf("second command: resp=%q err=%v", resp2, err)
+	for _, cmd := range []string{"say hi", "list"} {
+		resp, err := c.Exec(cmd, 2*time.Second)
+		if err != nil {
+			t.Fatalf("Exec(%q): %v", cmd, err)
+		}
+		if want := "OK:" + cmd; resp != want {
+			t.Fatalf("Exec(%q)=%q want %q", cmd, resp, want)
+		}
 	}
 }
 
 func TestDialAuthFailed(t *testing.T) {
-	s := &fakeRCONServer{password: "secret"}
-	addr := startFakeRCON(t, s)
+	s := &testServer{password: "secret", mirror: true}
+	addr := startTestServer(t, s)
 
-	if _, err := Dial(addr, "wrong"); !errors.Is(err, ErrAuthFailed) {
+	if _, err := DialWithConfig(addr, "wrong", fastConfig()); !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("want ErrAuthFailed, got %v", err)
 	}
 }
 
-func TestDialCoalescedPackets(t *testing.T) {
-	s := &fakeRCONServer{password: "secret", coalesce: true}
-	addr := startFakeRCON(t, s)
-
-	c, err := Dial(addr, "secret")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer c.Close()
-
-	c.Write("ping")
-	resp, _, err := c.Read()
+func TestDialCoalescedAuth(t *testing.T) {
+	c := dialTest(t, &testServer{
+		password:  "secret",
+		mirror:    true,
+		strayAuth: true,
+		reply:     func(cmd string) []byte { return []byte("OK:" + cmd) },
+	})
+	resp, err := c.Exec("ping", 2*time.Second)
 	if err != nil || resp != "OK:ping" {
-		t.Fatalf("coalesced read: resp=%q err=%v", resp, err)
+		t.Fatalf("resp=%q err=%v", resp, err)
 	}
 }
 
-func TestLargeResponse(t *testing.T) {
-	s := &fakeRCONServer{password: "secret", bigReply: true}
-	addr := startFakeRCON(t, s)
+// TestAuthTimeout covers a server that accepts the TCP connection but never
+// answers the auth request. The whole exchange is bounded, not each read.
+func TestAuthTimeout(t *testing.T) {
+	addr := startTestServer(t, &testServer{password: "secret", stallAuth: true})
 
-	c, err := Dial(addr, "secret")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
+	start := time.Now()
+	_, err := DialWithConfig(addr, "secret", Config{
+		DialTimeout: 2 * time.Second,
+		AuthTimeout: 100 * time.Millisecond,
+	})
+	if !errors.Is(err, ErrAuthTimeout) {
+		t.Fatalf("want ErrAuthTimeout, got %v", err)
 	}
-	defer c.Close()
-
-	c.Write("big")
-	resp, _, err := c.Read()
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if len(resp) != 40000 {
-		t.Fatalf("want 40000 bytes, got %d", len(resp))
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("auth timeout took %v", elapsed)
 	}
 }
 
-func TestOversizeResponse(t *testing.T) {
-	s := &fakeRCONServer{password: "secret", oversize: true}
-	addr := startFakeRCON(t, s)
+// TestAuthDeadline covers the batch endpoint's overall connect budget.
+func TestAuthDeadline(t *testing.T) {
+	addr := startTestServer(t, &testServer{password: "secret", stallAuth: true})
 
-	c, err := Dial(addr, "secret")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
+	start := time.Now()
+	_, err := DialWithConfig(addr, "secret", Config{
+		DialTimeout: 2 * time.Second,
+		AuthTimeout: 5 * time.Second,
+		Deadline:    time.Now().Add(100 * time.Millisecond),
+	})
+	if !errors.Is(err, ErrAuthTimeout) {
+		t.Fatalf("want ErrAuthTimeout, got %v", err)
 	}
-	defer c.Close()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("deadline-capped auth took %v", elapsed)
+	}
+}
 
-	c.Write("huge")
-	if _, _, err := c.Read(); !errors.Is(err, ErrResponseTooLong) {
-		t.Fatalf("want ErrResponseTooLong, got %v", err)
+func TestDialDeadlinePassed(t *testing.T) {
+	addr := startTestServer(t, &testServer{password: "secret"})
+
+	if _, err := DialWithConfig(addr, "secret", Config{Deadline: time.Now().Add(-time.Second)}); !errors.Is(err, ErrDialTimeout) {
+		t.Fatalf("want ErrDialTimeout, got %v", err)
+	}
+}
+
+// TestMultiPacketResponse covers the >100 KB replies Sandstorm splits into
+// 4082-byte packets; every packet must be concatenated.
+func TestMultiPacketResponse(t *testing.T) {
+	payload := testPayload(120_000)
+	c := dialTest(t, &testServer{
+		password: "secret",
+		chunk:    4082,
+		mirror:   true,
+		reply:    func(string) []byte { return payload },
+	})
+
+	resp, err := c.Exec("listgamemodeproperties", 5*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if resp != string(payload) {
+		t.Fatalf("got %d bytes, want %d", len(resp), len(payload))
+	}
+}
+
+// TestNoMarkerQuietGap covers servers that ignore the empty end marker.
+func TestNoMarkerQuietGap(t *testing.T) {
+	c := dialTest(t, &testServer{
+		password: "secret",
+		reply:    func(cmd string) []byte { return []byte("OK:" + cmd) },
+	})
+
+	start := time.Now()
+	resp, err := c.Exec("list", 2*time.Second)
+	if err != nil || resp != "OK:list" {
+		t.Fatalf("resp=%q err=%v", resp, err)
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("quiet gap was not applied (%v)", elapsed)
+	}
+}
+
+func TestSilentCommand(t *testing.T) {
+	c := dialTest(t, &testServer{password: "secret", mirror: true})
+
+	start := time.Now()
+	resp, err := c.Exec("say hello", 2*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if resp != "" {
+		t.Fatalf("want empty response, got %q", resp)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("silent command took %v", elapsed)
 	}
 }
 
 func TestCommandTooLong(t *testing.T) {
-	s := &fakeRCONServer{password: "secret"}
-	addr := startFakeRCON(t, s)
+	c := dialTest(t, &testServer{
+		password: "secret",
+		mirror:   true,
+		reply:    func(cmd string) []byte { return []byte("OK:" + cmd) },
+	})
 
-	c, err := Dial(addr, "secret")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer c.Close()
-
-	if _, err := c.Write(string(make([]byte, 2000))); !errors.Is(err, ErrCommandTooLong) {
+	if _, err := c.Exec(string(make([]byte, MaxCommandBytes+1)), 2*time.Second); !errors.Is(err, ErrCommandTooLong) {
 		t.Fatalf("want ErrCommandTooLong, got %v", err)
+	}
+
+	// The limit itself must be accepted.
+	cmd := strings.Repeat("x", MaxCommandBytes)
+	resp, err := c.Exec(cmd, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Exec at the size limit: %v", err)
+	}
+	if resp != "OK:"+cmd {
+		t.Fatalf("unexpected response at the size limit (%d bytes)", len(resp))
+	}
+}
+
+func TestOversizePacket(t *testing.T) {
+	c := dialTest(t, &testServer{password: "secret", mirror: true, oversize: true})
+
+	if _, err := c.Exec("huge", 2*time.Second); !errors.Is(err, ErrResponseTooLong) {
+		t.Fatalf("want ErrResponseTooLong, got %v", err)
+	}
+	if !c.Broken() {
+		t.Fatal("connection must be marked broken after a framing error")
+	}
+}
+
+func TestBadPacketSize(t *testing.T) {
+	c := dialTest(t, &testServer{password: "secret", mirror: true, badSize: true})
+
+	if _, err := c.Exec("bad", 2*time.Second); !errors.Is(err, ErrUnexpectedFormat) {
+		t.Fatalf("want ErrUnexpectedFormat, got %v", err)
+	}
+}
+
+func TestConnectionClosedBeforeResponse(t *testing.T) {
+	c := dialTest(t, &testServer{password: "secret", mirror: true, closeOnCmd: "bye"})
+
+	if _, err := c.Exec("bye", 2*time.Second); !errors.Is(err, ErrConnectionClosed) {
+		t.Fatalf("want ErrConnectionClosed, got %v", err)
+	}
+	if !c.Broken() {
+		t.Fatal("connection must be marked broken")
+	}
+	if _, err := c.Exec("list", 2*time.Second); !errors.Is(err, ErrConnectionClosed) {
+		t.Fatalf("second Exec: want ErrConnectionClosed, got %v", err)
+	}
+}
+
+// TestConnectionClosedMidResponse keeps the data already received (the command
+// itself succeeded) but marks the connection unusable for later commands.
+func TestConnectionClosedMidResponse(t *testing.T) {
+	c := dialTest(t, &testServer{
+		password:   "secret",
+		mirror:     true,
+		truncOnCmd: "partial",
+		chunk:      10,
+		reply:      func(string) []byte { return testPayload(100) },
+	})
+
+	resp, err := c.Exec("partial", 2*time.Second)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if want := string(testPayload(100)[:10]); resp != want {
+		t.Fatalf("got %q want %q", resp, want)
+	}
+	if !c.Broken() {
+		t.Fatal("connection must be marked broken after EOF")
+	}
+}
+
+// TestDeadlineThenReuse forces the overall deadline, then verifies the next
+// command drains the late reply instead of mixing it into its own response.
+func TestDeadlineThenReuse(t *testing.T) {
+	c := dialTest(t, &testServer{
+		password: "secret",
+		mirror:   true,
+		delayCmd: "slow",
+		delay:    150 * time.Millisecond,
+		reply:    func(cmd string) []byte { return []byte("OK:" + cmd) },
+	})
+
+	if _, err := c.Exec("slow", 50*time.Millisecond); !errors.Is(err, ErrResponseTimeout) {
+		t.Fatalf("want ErrResponseTimeout, got %v", err)
+	}
+
+	resp, err := c.Exec("fast", 2*time.Second)
+	if err != nil {
+		t.Fatalf("Exec(fast): %v", err)
+	}
+	if resp != "OK:fast" {
+		t.Fatalf("got %q, stale packets leaked into the next response", resp)
 	}
 }
 
 func TestDialRefused(t *testing.T) {
-	// Nothing listens on this port (kernel assigns ephemeral ports from
-	// above 1024; use a reserved port on loopback).
-	if _, err := Dial("127.0.0.1:1", "x"); err == nil {
+	if _, err := DialWithConfig("127.0.0.1:1", "x", fastConfig()); err == nil {
 		t.Fatal("want dial error, got nil")
 	}
 }
@@ -264,8 +470,7 @@ func TestFailedAuthClosesConn(t *testing.T) {
 			return
 		}
 		// Reply with a failed auth (id = -1).
-		resp := buildPacket(-1, respAuthResponse, "")
-		conn.Write(resp)
+		_ = writeTestPacket(conn, -1, respAuthResponse, nil)
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		for {
 			_, err := conn.Read(buf)
@@ -276,7 +481,7 @@ func TestFailedAuthClosesConn(t *testing.T) {
 		}
 	}()
 
-	if _, err := Dial(ln.Addr().String(), "wrong"); !errors.Is(err, ErrAuthFailed) {
+	if _, err := DialWithConfig(ln.Addr().String(), "wrong", fastConfig()); !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("want ErrAuthFailed, got %v", err)
 	}
 	select {
